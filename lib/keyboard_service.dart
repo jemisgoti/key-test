@@ -1,105 +1,215 @@
+import 'dart:async';
 import 'dart:developer';
 
-import 'package:flutter/services.dart';
-import 'package:flutter_keyboard/key_type.dart';
-import 'package:flutter_soloud/flutter_soloud.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_keyboard/utils/key_layout.dart';
+import 'package:flutter_keyboard/utils/key_type.dart';
+import 'package:flutter_keyboard/utils/utils.dart';
+import 'package:flutter_soloud/flutter_soloud.dart';
 
-
+/// A service that manages key press behavior, sound effects, keyboard
+/// layout, and user input for a virtual keyboard.
 class KeyboardService {
-  static final KeyboardService _instance = KeyboardService._internal();
-  factory KeyboardService() => _instance;
-
-  KeyboardService._internal();
-
-  final SoLoud _soloud = SoLoud.instance;
-  late AudioSource _source;
-  bool _initialized = false;
-
-  bool enableSound = true;
-
-  final TextEditingController inputController = TextEditingController();
-  List<List<KeyboardKeyModel>> keyboardLayout = [[]];
-
-  void updateLayout(List<List<KeyboardKeyModel>> keyboardLayout) {
-    this.keyboardLayout = keyboardLayout;
+  /// Creates a [KeyboardService] with the given styles and test type.
+  ///
+  /// Initializes the keyboard layout based on the [keyStyle].
+  KeyboardService({
+    required this.keyStyle,
+    required this.keyboardStyle,
+    required this.keyboardTestType,
+  }) {
+    switch (keyStyle) {
+      case KeyStyle.macos:
+        keyboardLayout = macKeyboardLayout;
+      case KeyStyle.windows:
+        keyboardLayout = macKeyboardLayout;
+    }
   }
 
-  void initialize() async {
-    if (_initialized) return;
+  /// The SoLoud audio engine instance.
+  final SoLoud soloud = SoLoud.instance;
 
-    await _soloud.init();
-    _source = await _soloud.loadAsset('assets/sounds/mechanical_key_click.mp3');
-    HardwareKeyboard.instance.addHandler(_handleRawKey);
+  /// The loaded audio source for key click sounds.
+  late AudioSource _source;
+
+  /// Whether the service has already been initialized.
+  bool _initialized = false;
+
+  /// Whether key click sound effects are enabled.
+  bool _soundEnabled = true;
+
+  /// Style used for key shapes and labels (e.g., macOS, Windows).
+  KeyStyle keyStyle;
+
+  /// Visual layout style of the keyboard.
+  KeyboardStyle keyboardStyle;
+
+  /// The current keyboard test mode.
+  KeyboardTestType keyboardTestType;
+
+  /// Controller for managing user input text.
+  final TextEditingController inputController = TextEditingController();
+
+  /// The complete layout of keys as a 2D list.
+  List<List<KeyboardKeyModel>> keyboardLayout = <List<KeyboardKeyModel>>[
+    <KeyboardKeyModel>[],
+  ];
+
+  /// A set of currently pressed keys.
+  Set<LogicalKeyboardKey> pressed = <LogicalKeyboardKey>{};
+
+  /// A stream for broadcasting key press state changes.
+  StreamController<Set<LogicalKeyboardKey>> streamController =
+      StreamController<Set<LogicalKeyboardKey>>.broadcast();
+
+  /// Updates the keyboard layout dynamically.
+  set layout(List<List<KeyboardKeyModel>> keyboardLayout) =>
+      this.keyboardLayout = keyboardLayout;
+
+  /// Returns the current keyboard layout.
+  List<List<KeyboardKeyModel>> get layout => keyboardLayout;
+
+  /// Initializes the keyboard service.
+  ///
+  /// Loads sound assets and attaches keyboard event listeners.
+  Future<void> initialize() async {
+    if (_initialized) {
+      return;
+    }
+    await soloud.init();
+    _source = await soloud.loadAsset('assets/sounds/short-sound.mp3');
+    HardwareKeyboard.instance.addHandler(handleRawKey);
     _initialized = true;
   }
 
+  /// Disposes resources and removes keyboard listeners.
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleRawKey);
-    _soloud.deinit();
+    HardwareKeyboard.instance.removeHandler(handleRawKey);
+    soloud.deinit();
   }
 
-  bool _handleRawKey(KeyEvent event) {
+  /// Handles raw key events from the system.
+  ///
+  /// Delegates to key press or key release handlers.
+  bool handleRawKey(KeyEvent event) {
     if (event is KeyDownEvent) {
-      final keyLabel = event.logicalKey.keyLabel;
-
-      handleKeyPress(keyLabel, event.logicalKey);
-      return true;
-    } else {
-      return false;
+      handleKeyPress(event.logicalKey);
+    } else if (event is KeyUpEvent) {
+      handleKeyRelease(event.logicalKey);
     }
+    return true;
   }
 
-  /// Core logic to process a key
-  void handleKeyPress(String keyLabel, LogicalKeyboardKey key) {
+  /// Handles the logic when a key is pressed.
+  ///
+  /// Updates input, highlights key, and plays sound if enabled.
+  void handleKeyPress(LogicalKeyboardKey key) {
+    debugPrint(keyboardTestType.toString());
+
+    pressed.add(key);
+    streamController.add(pressed);
+    highlightKey(key);
     playKeyClickSound();
 
+    if (keyboardTestType != KeyboardTestType.typing) {
+      return;
+    }
+
+    final String text = inputController.text;
+    final TextSelection selection = inputController.selection;
+    final int baseOffset = selection.baseOffset;
+    final int extentOffset = selection.extentOffset;
+    final bool isTextSelected = baseOffset != extentOffset;
+
+    String newText = text;
+    int newOffset = baseOffset;
+
     if (key == LogicalKeyboardKey.backspace) {
-      final currentText = inputController.text;
-      if (currentText.isNotEmpty) {
-        inputController.text = currentText.substring(0, currentText.length - 1);
-        inputController.selection = TextSelection.fromPosition(
-          TextPosition(offset: inputController.text.length),
-        );
+      if (isTextSelected) {
+        newText = text.replaceRange(baseOffset, extentOffset, '');
+        newOffset = baseOffset;
+      } else if (baseOffset > 0) {
+        newText = text.replaceRange(baseOffset - 1, baseOffset, '');
+        newOffset = baseOffset - 1;
       }
-    } else if (keyLabel.isNotEmpty && keyLabel.length == 1) {
-      final updated = inputController.text + keyLabel;
-      inputController.text = updated;
-      inputController.selection = TextSelection.fromPosition(
-        TextPosition(offset: updated.length),
-      );
+    } else if (key == LogicalKeyboardKey.space) {
+      newText = text.replaceRange(baseOffset, extentOffset, ' ');
+      newOffset = baseOffset + 1;
+    } else if (key.keyLabel.isNotEmpty && key.keyLabel.length == 1) {
+      newText = text.replaceRange(baseOffset, extentOffset, key.keyLabel);
+      newOffset = baseOffset + 1;
+    }
+
+    inputController.text = newText;
+    inputController.selection = TextSelection.collapsed(offset: newOffset);
+  }
+
+  /// Highlights the matching key in the layout as pressed.
+  Future<void> highlightKey(LogicalKeyboardKey key) async {
+    for (final List<KeyboardKeyModel> row in keyboardLayout) {
+      for (final KeyboardKeyModel keyModel in row) {
+        if (keyModel.key.keyId == key.keyId) {
+          keyModel.isPressed.value = true;
+          return;
+        }
+      }
     }
   }
 
-  /// Called by UI key widgets to simulate a press
-  void simulateKeyPress(KeyboardKeyModel model) {
-    if (model.label == '⌫' || model.label.toLowerCase() == 'backspace') {
-      handleKeyPress('', LogicalKeyboardKey.backspace);
-    } else {
-      final logicalKey = LogicalKeyboardKey(
-        model.label.codeUnitAt(0), // basic mapping (can be extended)
-      );
+  /// Handles the logic when a key is released.
+  ///
+  /// Removes it from the pressed set and updates visual state.
+  Future<void> handleKeyRelease(LogicalKeyboardKey key) async {
+    pressed.remove(key);
+    streamController.add(pressed);
 
-      handleKeyPress(model.label, logicalKey);
+    if (keyboardTestType == KeyboardTestType.keyTest) {
+      return;
+    }
+
+    for (final List<KeyboardKeyModel> row in keyboardLayout) {
+      for (final KeyboardKeyModel keyModel in row) {
+        if (keyModel.key.keyId == key.keyId) {
+          keyModel.isPressed.value = false;
+          return;
+        }
+      }
     }
   }
 
+  /// Plays a key click sound using the loaded audio source.
   Future<void> playKeyClickSound() async {
-    if (!enableSound) {
+    if (!_soundEnabled) {
       return;
     }
     try {
-      await _soloud.play(_source);
-    } catch (e) {
-      print('Error playing sound: $e');
+      await soloud.play(_source);
+    } on Exception catch (e) {
+      log('Error playing sound: $e');
     }
   }
 
-  void updateSound(bool value) {
-    enableSound = value;
+  /// Enables or disables key click sounds.
+  set soundEnabled(bool value) {
+    _soundEnabled = value;
   }
 
-  void reset() {
+  /// Returns whether key click sound effects are enabled.
+  bool get soundEnabled => _soundEnabled;
+
+  /// Clears the input, release all keys, and resets the keyboard state.
+  Future<void> reset() async {
     inputController.clear();
+    pressed.clear();
+
+    for (final List<KeyboardKeyModel> row in keyboardLayout) {
+      for (final KeyboardKeyModel keyModel in row) {
+        if (keyModel.isPressed.value) {
+          keyModel.isPressed.value = false;
+          await Future<void>.delayed(const Duration(milliseconds: 7));
+        }
+      }
+    }
   }
 }
